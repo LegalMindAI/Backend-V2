@@ -1,0 +1,6 @@
+uvicorn 
+groq
+pydantic
+PyMuPDF
+httpx
+python-dotenv
