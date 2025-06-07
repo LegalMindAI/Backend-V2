@@ -30,13 +30,13 @@ app_router = APIRouter()
 class BasicChatRequest(BaseModel):
     extracted_text: str = ""
     question: str
-    previous_convo: list[list[str]] = []
+    previous_convo: list[str] = []
 
 # Request Schema for Advanced Chatting
 class AdvancedChatRequest(BaseModel):
     extracted_text: str = ""
     question: str
-    previous_convo: list[list[str]] = []
+    previous_convo: list[str] = []
 
 # Request Schema for Text to Speech
 class TextToSpeechRequest(BaseModel):
@@ -46,7 +46,7 @@ class TextToSpeechRequest(BaseModel):
 class HinglishChatRequest(BaseModel):
     extracted_text: str = ""
     question: str
-    previous_convo: list[list[str]] = []
+    previous_convo: list[str] = []
 
 # endpoint for uploading pdf
 @app_router.post("/pdf-upload")
@@ -92,8 +92,9 @@ async def chat_basic(request: BasicChatRequest):
                 },
                 {
                     "role": "user",
-                    "content": f"Previous Conversation: {request.previous_convo}"
+                    "content": "Previous Conversation:\n" + "\n".join(request.previous_convo)
                 }
+
             ],
             temperature=0.7,
             max_completion_tokens=1024,
