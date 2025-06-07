@@ -28,19 +28,25 @@ app_router = APIRouter()
 
 # Request Schema for Basic Chatting
 class BasicChatRequest(BaseModel):
-    extracted_text: str
+    extracted_text: str = ""
     question: str
-    previous_convo: list[list[str]]
+    previous_convo: list[list[str]] = []
 
 # Request Schema for Advanced Chatting
 class AdvancedChatRequest(BaseModel):
-    extracted_text: str
+    extracted_text: str = ""
     question: str
-    previous_convo: list[list[str]]
+    previous_convo: list[list[str]] = []
 
 # Request Schema for Text to Speech
 class TextToSpeechRequest(BaseModel):
     text: str
+
+# Request Schema for Hinglish Chatting
+class HinglishChatRequest(BaseModel):
+    extracted_text: str = ""
+    question: str
+    previous_convo: list[list[str]] = []
 
 # endpoint for uploading pdf
 @app_router.post("/pdf-upload")
@@ -325,3 +331,97 @@ async def speech_to_text(
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error transcribing audio: {type(e).__name__}: {str(e)}")
+
+@app_router.post("/chat-hinglish")
+async def chat_hinglish(request: HinglishChatRequest):
+    try:
+        # First translate the Hinglish question to English for better RAG search
+        translation_completion = groq.chat.completions.create(
+            model="qwen-qwq-32b",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a translator. Translate the given Hinglish text to proper English. Only return the English translation, nothing else."
+                },
+                {
+                    "role": "user",
+                    "content": f"Translate this Hinglish text to English: {request.question}"
+                }
+            ],
+            temperature=0.3,
+            max_completion_tokens=512,
+            top_p=0.95,
+            stream=False,
+            stop=None,
+        )
+        
+        translated_question = translation_completion.choices[0].message.content if translation_completion.choices else request.question
+        
+        # Retrieve previous cases using the translated English question
+        research_payload = {
+            "query": translated_question,
+            "top_k": 2
+        }
+        
+        async with httpx.AsyncClient() as client:
+            research_response = await client.post(
+                f"{BASE_API}/fetch",
+                json=research_payload,
+                headers={
+                    "accept": "application/json",
+                    "Content-Type": "application/json"
+                }
+            )
+            
+        if research_response.status_code == 200:
+            previous_cases = research_response.json()
+            # Log the response, truncated by 30 characters
+            response_text = str(previous_cases)
+            truncated_response = response_text[:-30] if len(response_text) > 30 else response_text
+            logging.info(f"Research response (truncated): {truncated_response}")
+        else:
+            previous_cases = {}  # Fallback if research endpoint fails
+            logging.warning(f"Research endpoint failed with status: {research_response.status_code}")
+        
+        completion = groq.chat.completions.create(
+            model = "qwen-qwq-32b",
+            messages= [
+                {
+                    "role": "system",
+                    "content": "You're a helpful Lawyer based in India. You are given a question and a context. We've also implemented RAG (Retrieval-Augmented Generation) to retrieve previous cases and their verdicts. You need to answer the question based on the context and those previous cases. You MUST answer in romanized Hinglish only - that means Hindi words written in English script (Roman alphabet), mixed with English words. Do NOT use Devanagari script. Example: 'Aapka case bahut strong hai, court mein jeet ke chances zyada hain.'"
+                },
+                {
+                    "role": "user",
+                    "content": f"Previous Cases: {previous_cases}"
+                },
+                {
+                    "role": "user",
+                    "content": f"Context: {request.extracted_text}"
+                },
+                {
+                    "role": "user",
+                    "content": f"Question: {request.question}"
+                },
+                {
+                    "role": "user",
+                    "content": f"Previous Conversation: {request.previous_convo}"
+                }
+            ],
+            temperature=0.7,
+            max_completion_tokens=4096,
+            top_p=0.95,
+            stream=False,
+            stop=None,
+        )
+
+        answer = completion.choices[0].message.content if completion.choices else None
+
+        if answer:
+            return {
+                "answer": answer
+            }
+        else:
+            raise HTTPException(status_code=500, detail="No response, Try again")
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")

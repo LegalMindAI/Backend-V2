@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from .endpoints import chat_basic, chat_advanced, pdf_upload,text_to_speech, speech_to_text, image_ocr, get_audio
+from .endpoints import chat_basic, chat_advanced, pdf_upload,text_to_speech, speech_to_text, image_ocr, get_audio, chat_hinglish
 
 app_router = APIRouter()
 
@@ -23,3 +23,6 @@ app_router.post("/image-ocr")(image_ocr)
 
 # Route to Play Audio
 app_router.get("/audio/{audio_id}")(get_audio)
+
+# Route to chat in local language
+app_router.post("/chat-hinglish")(chat_hinglish)
