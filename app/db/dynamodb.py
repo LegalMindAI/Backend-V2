@@ -13,7 +13,7 @@ load_dotenv()
 # DynamoDB configs
 AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY")
 AWS_SECRET_KEY = os.getenv("AWS_SECRET_KEY")
-AWS_REGION = os.getenv("AWS_REGION")
+AWS_REGION = os.getenv("DDB_AWS_REGION")
 CHAT_TABLE_NAME = os.getenv("DYNAMODB_CHAT_TABLE")
 
 # Initialize DDB client
