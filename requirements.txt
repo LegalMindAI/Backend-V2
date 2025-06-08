@@ -6,3 +6,4 @@ httpx
 python-dotenv
 fastapi
 python-multipart
+boto3

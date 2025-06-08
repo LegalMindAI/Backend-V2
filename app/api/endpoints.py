@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, File, UploadFile
+from fastapi import APIRouter, HTTPException, File, UploadFile, Depends
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from pathlib import Path
@@ -10,9 +10,12 @@ import logging
 import base64
 import uuid
 import tempfile
+import json
 
 # Load functions
 from .utils.pdf_handler import extract_text_from_pdf
+from ..db.dynamodb import save_or_update_chat, get_chat_by_id
+from ..auth.firebase_auth import get_current_user
 
 # Load ENV
 load_dotenv()
@@ -20,7 +23,7 @@ load_dotenv()
 # Initialize Groq client
 groq = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-# Base API URL(Update with AWS endpoint)
+# Base API URL(Update with AWS endpoint)[This is the Backend v1]
 BASE_API = "http://localhost"
 
 # Initialize router
@@ -30,13 +33,13 @@ app_router = APIRouter()
 class BasicChatRequest(BaseModel):
     extracted_text: str = ""
     question: str
-    previous_convo: list[str] = []
+    chat_id: str = None  # we will only pass chat_id if we want to continue a conversation
 
 # Request Schema for Advanced Chatting
 class AdvancedChatRequest(BaseModel):
     extracted_text: str = ""
     question: str
-    previous_convo: list[str] = []
+    chat_id: str = None  # we will only pass chat_id if we want to continue a conversation
 
 # Request Schema for Text to Speech
 class TextToSpeechRequest(BaseModel):
@@ -46,7 +49,45 @@ class TextToSpeechRequest(BaseModel):
 class HinglishChatRequest(BaseModel):
     extracted_text: str = ""
     question: str
-    previous_convo: list[str] = []
+    chat_id: str = None  # we will only pass chat_id if we want to continue a conversation
+
+# Helper function to validate UUID
+async def validate_chat_id(chat_id: str | None, user_id: str) -> str | None:
+    # If chat_id is None, do nothing, we can create
+    if chat_id is None:
+        return None
+        
+    # First check UUID format without making any DB calls(this is to avoid unnecessary DB calls and save cost)
+    try:
+        uuid_obj = uuid.UUID(chat_id)
+        chat_id_str = str(uuid_obj)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid chat_id format. Must be a valid UUID.")
+    
+    # Only check DynamoDB if UUID format is valid
+    try:
+        await get_chat_by_id(user_id, chat_id_str)
+        return chat_id_str
+    except HTTPException as e:
+        if e.status_code == 404:
+            raise HTTPException(status_code=400, detail="Chat ID does not exist.")
+        raise e
+
+# Helper function to fetch and format previous conversation
+async def get_formatted_previous_convo(user_id: str, chat_id: str):
+    previous_convo = []
+    if chat_id and user_id:
+        try:
+            chat_data = await get_chat_by_id(user_id, chat_id)
+            # Only include user messages, skip assistant messages(this is to keep the context window small)
+            for msg in chat_data.get('conversation', []):
+                if msg.get('role') == 'user':
+                    previous_convo.append(f"User: {msg.get('content', '')}")
+        except HTTPException as e:
+            if e.status_code != 404:
+                raise e
+            # continue with empty previous_convo
+    return previous_convo
 
 # endpoint for uploading pdf
 @app_router.post("/pdf-upload")
@@ -73,8 +114,13 @@ async def pdf_upload(
 
 # Endpoint for Basic Chatting
 @app_router.post("/chat-basic")
-async def chat_basic(request: BasicChatRequest):
+async def chat_basic(request: BasicChatRequest, current_user: dict = Depends(get_current_user)):
     try:
+        user_id = current_user.get("uid")
+        # Validate chat_id
+        validated_chat_id = await validate_chat_id(request.chat_id, user_id)
+        previous_convo = await get_formatted_previous_convo(user_id, validated_chat_id)
+        
         completion = groq.chat.completions.create(
             model = "mistral-saba-24b",
             messages= [
@@ -92,9 +138,8 @@ async def chat_basic(request: BasicChatRequest):
                 },
                 {
                     "role": "user",
-                    "content": "Previous Conversation:\n" + "\n".join(request.previous_convo)
+                    "content": "Previous Conversation:\n" + "\n".join(previous_convo)
                 }
-
             ],
             temperature=0.7,
             max_completion_tokens=1024,
@@ -107,7 +152,19 @@ async def chat_basic(request: BasicChatRequest):
         answer = completion.choices[0].message.content if completion.choices else None
 
         if answer:
-            return answer
+            answer_json = json.loads(answer)
+            answer_text = answer_json.get("answer", "")
+
+            if user_id:
+                await save_or_update_chat(
+                    user_id=user_id,
+                    chat_id=validated_chat_id,
+                    question=request.question,
+                    previous_convo=previous_convo,
+                    answer=answer_text
+                )
+            
+            return answer_json
         else:
             raise HTTPException(status_code=500, detail="No response, Try again")
         
@@ -116,8 +173,13 @@ async def chat_basic(request: BasicChatRequest):
 
 # Endpoint for Advanced Chatting
 @app_router.post("/chat-advanced")
-async def chat_advanced(request: AdvancedChatRequest):
+async def chat_advanced(request: AdvancedChatRequest, current_user: dict = Depends(get_current_user)):
     try:
+        user_id = current_user.get("uid")
+        # Validate chat_id
+        validated_chat_id = await validate_chat_id(request.chat_id, user_id)
+        previous_convo = await get_formatted_previous_convo(user_id, validated_chat_id)
+        
         # Retrieve previous cases using the research endpoint
         research_payload = {
             "query": request.question,
@@ -165,7 +227,7 @@ async def chat_advanced(request: AdvancedChatRequest):
                 },
                 {
                     "role": "user",
-                    "content": f"Previous Conversation: {request.previous_convo}"
+                    "content": f"Previous Conversation: {previous_convo}"
                 }
             ],
             temperature=0.7,
@@ -178,6 +240,16 @@ async def chat_advanced(request: AdvancedChatRequest):
         answer = completion.choices[0].message.content if completion.choices else None
 
         if answer:
+            # Store chat history if user is authenticated
+            if user_id:
+                await save_or_update_chat(
+                    user_id=user_id,
+                    chat_id=validated_chat_id,
+                    question=request.question,
+                    previous_convo=previous_convo,
+                    answer=answer
+                )
+                
             return {
                 "answer": answer
             }
@@ -334,8 +406,13 @@ async def speech_to_text(
         raise HTTPException(status_code=500, detail=f"Error transcribing audio: {type(e).__name__}: {str(e)}")
 
 @app_router.post("/chat-hinglish")
-async def chat_hinglish(request: HinglishChatRequest):
+async def chat_hinglish(request: HinglishChatRequest, current_user: dict = Depends(get_current_user)):
     try:
+        user_id = current_user.get("uid")
+        # Validate chat_id
+        validated_chat_id = await validate_chat_id(request.chat_id, user_id)
+        previous_convo = await get_formatted_previous_convo(user_id, validated_chat_id)
+        
         # First translate the Hinglish question to English for better RAG search
         translation_completion = groq.chat.completions.create(
             model="qwen-qwq-32b",
@@ -405,7 +482,7 @@ async def chat_hinglish(request: HinglishChatRequest):
                 },
                 {
                     "role": "user",
-                    "content": f"Previous Conversation: {request.previous_convo}"
+                    "content": f"Previous Conversation: {previous_convo}"
                 }
             ],
             temperature=0.7,
@@ -418,6 +495,16 @@ async def chat_hinglish(request: HinglishChatRequest):
         answer = completion.choices[0].message.content if completion.choices else None
 
         if answer:
+            # Store chat history if user is authenticated
+            if user_id:
+                await save_or_update_chat(
+                    user_id=user_id,
+                    chat_id=validated_chat_id,
+                    question=request.question,
+                    previous_convo=previous_convo,
+                    answer=answer
+                )
+                
             return {
                 "answer": answer
             }
