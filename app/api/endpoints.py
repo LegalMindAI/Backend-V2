@@ -80,7 +80,7 @@ async def chat_basic(request: BasicChatRequest):
             messages= [
                 {
                     "role": "system",
-                    "content": "You are a helpful Lawyer based in India. You are given a question and a context. You need to answer the question based on the context. You need to answer in the same language as the question. Always return a JSON as {answer: <answer>}"
+                    "content": "You are a helpful Lawyer based in India. You are given a question and a context. You need to answer the question based on the context. You need to answer in the same language as the question. Always return a JSON object with an 'answer' field containing your response."
                 },
                 {
                     "role": "user",
