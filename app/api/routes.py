@@ -8,7 +8,8 @@ from .endpoints import (
     speech_to_text,
     image_ocr,
     get_audio,
-    chat_hinglish
+    chat_hinglish,
+    research_wrapper
 )
 
 # Create a new router that includes authentication
@@ -19,6 +20,9 @@ app_router.post("/chat-basic", dependencies=[Depends(get_current_user)])(chat_ba
 
 # Route for Advanced Chatting
 app_router.post("/chat-advanced", dependencies=[Depends(get_current_user)])(chat_advanced)
+
+#Route for research cases 
+app_router.post("/research", dependencies=[Depends(get_current_user)])(research_wrapper)
 
 # Route for Text to Speech
 app_router.post("/text-to-speech", dependencies=[Depends(get_current_user)])(text_to_speech)

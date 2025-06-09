@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, File, UploadFile, Depends
+from fastapi import APIRouter, HTTPException, File, UploadFile, Depends , Body
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from pathlib import Path
@@ -25,6 +25,10 @@ groq = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 # Base API URL(Update with AWS endpoint)[This is the Backend v1]
 BASE_API = "http://localhost"
+# BASE_API = "http://172.17.0.1:8001"
+# BASE_API = "https://hkksslsc-80.inc1.devtunnels.ms/"
+# https://hkksslsc-80.inc1.devtunnels.ms/
+# BASE_API = "http://172.17.0.0:80"
 
 # Initialize router
 app_router = APIRouter()
@@ -50,6 +54,11 @@ class HinglishChatRequest(BaseModel):
     extracted_text: str = ""
     question: str
     chat_id: str = None  # we will only pass chat_id if we want to continue a conversation
+
+class ResearchRequest(BaseModel):
+    query: str
+    top_k: int = 5
+    chat_id: str = None
 
 # Helper function to validate UUID
 async def validate_chat_id(chat_id: str | None, user_id: str) -> str | None:
@@ -258,6 +267,97 @@ async def chat_advanced(request: AdvancedChatRequest, current_user: dict = Depen
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app_router.post("/research-wrapper")
+async def research_wrapper(request: ResearchRequest = Body(...) ,current_user: dict = Depends(get_current_user)):
+    """
+    Wrapper route for /research that proxies the request and returns the result.
+    Behaves similarly to chat_advanced, but only proxies and returns the research result.
+    """
+    try:
+        user_id = current_user.get("uid")
+        # Validate chat_id
+        validated_chat_id = await validate_chat_id(request.chat_id, user_id)
+        previous_convo = await get_formatted_previous_convo(user_id, validated_chat_id)
+        research_payload = {
+            "query": request.query,
+            "top_k": request.top_k,
+        }
+
+        async with httpx.AsyncClient() as client:
+            research_response = await client.post(
+                f"{BASE_API}/research",
+                json=research_payload,
+                headers={
+                    "accept": "application/json",
+                    "Content-Type": "application/json"
+                }
+            )
+
+        if research_response.status_code == 200:
+            previous_cases = research_response.json()
+            # Truncate previous_cases to 2000 characters
+            previous_cases_str = str(previous_cases)
+            if len(previous_cases_str) > 2000:
+                previous_cases_str = previous_cases_str[:1000] + " ...[truncated]"
+            # Limit previous_convo to last 3 messages
+            if isinstance(previous_convo, list):
+                previous_convo = previous_convo[-3:]
+        else:
+            previous_cases_str = ""
+            logging.warning(f"Research endpoint failed with status: {research_response.status_code}")
+            previous_cases = {}
+        
+        completion = groq.chat.completions.create(
+            model = "qwen-qwq-32b",
+            messages= [
+                {
+                    "role": "system",
+                    "content": "You're a helpful Lawyer based in India. You are given a question and a context We've also implmented RAG (Retrieval-Augmented Generation) to retrive previous cases and their verdicts. You need to answer the question based on the context and those previous cases. You need to answer in the same language as the question."
+                },
+                {
+                    "role": "user",
+                    "content": f"Previous Cases: {previous_cases_str}"
+                },
+                {
+                    "role": "user",
+                    "content": f"Question: {request.query}"
+                },
+                {
+                    "role": "user",
+                    "content": f"Previous Conversation: {previous_convo}"
+                }
+            ],
+            temperature=0.7,
+            max_completion_tokens=4096,
+            top_p=0.95,
+            stream=False,
+            stop=None,
+        )
+
+        answer = completion.choices[0].message.content if completion.choices else None
+
+        if answer:
+            # Store chat history if user is authenticated
+            if user_id:
+                await save_or_update_chat(
+                    user_id=user_id,
+                    chat_id=validated_chat_id,
+                    question=request.query,
+                    previous_convo=previous_convo,
+                    answer=answer
+                )
+                
+            return {
+                "answer": answer
+            }
+        else:
+            raise HTTPException(status_code=500, detail="No response, Try again")
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+          
 
 # Endpoint for Image OCR
 @app_router.post("/image-ocr")
