@@ -58,7 +58,6 @@ class HinglishChatRequest(BaseModel):
 class ResearchRequest(BaseModel):
     query: str
     top_k: int = 5
-    chat_id: str = None
 
 # Helper function to validate UUID
 async def validate_chat_id(chat_id: str | None, user_id: str) -> str | None:
@@ -135,7 +134,7 @@ async def chat_basic(request: BasicChatRequest, current_user: dict = Depends(get
             messages= [
                 {
                     "role": "system",
-                    "content": "You are a helpful Lawyer based in India. You are given a question and a context. You need to answer the question based on the context. You need to answer in the same language as the question. Always return a JSON object with an 'answer' field containing your response."
+                    "content": "You are a knowledgeable Indian lawyer with expertise across all areas of Indian law including civil, criminal, corporate, family, property, and constitutional law. When responding to queries:\n1. Provide clear, practical legal information based on Indian laws and precedents\n2. Explain relevant legal procedures and requirements\n3. Mention applicable sections of law and important case laws when relevant\n4. Include important considerations and potential challenges\n5. Always maintain a professional yet empathetic tone\n6. If specific legal advice is needed, recommend consulting a lawyer in person\n7. Format your response in a clear, structured manner\nAlways return a JSON object with an 'answer' field containing your response."
                 },
                 {
                     "role": "user",
@@ -161,23 +160,36 @@ async def chat_basic(request: BasicChatRequest, current_user: dict = Depends(get
         answer = completion.choices[0].message.content if completion.choices else None
 
         if answer:
-            answer_json = json.loads(answer)
-            answer_text = answer_json.get("answer", "")
+            try:
+                answer_json = json.loads(answer)
+                answer_text = answer_json.get("answer", "")
 
-            if user_id:
-                await save_or_update_chat(
-                    user_id=user_id,
-                    chat_id=validated_chat_id,
-                    question=request.question,
-                    previous_convo=previous_convo,
-                    answer=answer_text
-                )
-            
-            return answer_json
+                if user_id:
+                    chat_result = await save_or_update_chat(
+                        user_id=user_id,
+                        chat_id=validated_chat_id,
+                        question=request.question,
+                        previous_convo=previous_convo,
+                        answer=answer_text,
+                        chat_type="basic"
+                    )
+                    
+                    # Add chat_id and status to response
+                    answer_json["chat_id"] = chat_result["chat_id"]
+                    if not request.chat_id:
+                        answer_json["status"] = "Chat doesn't exist, creating new"
+                    else:
+                        answer_json["status"] = "Chat updated successfully"
+                
+                return answer_json
+            except json.JSONDecodeError as e:
+                logging.error(f"Failed to parse JSON response: {e}")
+                raise HTTPException(status_code=500, detail=f"Invalid response format from AI: {str(e)}")
         else:
             raise HTTPException(status_code=500, detail="No response, Try again")
         
     except Exception as e:
+        logging.error(f"Error in chat-basic: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 # Endpoint for Advanced Chatting
@@ -220,7 +232,7 @@ async def chat_advanced(request: AdvancedChatRequest, current_user: dict = Depen
             messages= [
                 {
                     "role": "system",
-                    "content": "You're a helpful Lawyer based in India. You are given a question and a context We've also implmented RAG (Retrieval-Augmented Generation) to retrive previous cases and their verdicts. You need to answer the question based on the context and those previous cases. You need to answer in the same language as the question."
+                    "content": "You're a helpful Lawyer based in India. You are given a question and a context We've also implmented RAG (Retrieval-Augmented Generation) to retrive previous cases and their verdicts. You need to answer the question based on the context and those previous cases. You need to answer in the same language as the question.(Always respond in english only)"
                 },
                 {
                     "role": "user",
@@ -251,14 +263,21 @@ async def chat_advanced(request: AdvancedChatRequest, current_user: dict = Depen
         if answer:
             # Store chat history if user is authenticated
             if user_id:
-                await save_or_update_chat(
+                chat_result = await save_or_update_chat(
                     user_id=user_id,
                     chat_id=validated_chat_id,
                     question=request.question,
                     previous_convo=previous_convo,
-                    answer=answer
+                    answer=answer,
+                    chat_type="advanced"
                 )
                 
+                return {
+                    "answer": answer,
+                    "chat_id": chat_result["chat_id"],
+                    "status": "Chat doesn't exist, creating new" if not request.chat_id else "Chat updated successfully"
+                }
+            
             return {
                 "answer": answer
             }
@@ -273,13 +292,9 @@ async def chat_advanced(request: AdvancedChatRequest, current_user: dict = Depen
 async def research_wrapper(request: ResearchRequest = Body(...) ,current_user: dict = Depends(get_current_user)):
     """
     Wrapper route for /research that proxies the request and returns the result.
-    Behaves similarly to chat_advanced, but only proxies and returns the research result.
+    Simply forwards the request to the research endpoint and returns its response.
     """
-    try:
-        user_id = current_user.get("uid")
-        # Validate chat_id
-        validated_chat_id = await validate_chat_id(request.chat_id, user_id)
-        previous_convo = await get_formatted_previous_convo(user_id, validated_chat_id)
+    try:        
         research_payload = {
             "query": request.query,
             "top_k": request.top_k,
@@ -296,64 +311,12 @@ async def research_wrapper(request: ResearchRequest = Body(...) ,current_user: d
             )
 
         if research_response.status_code == 200:
-            previous_cases = research_response.json()
-            # Truncate previous_cases to 2000 characters
-            previous_cases_str = str(previous_cases)
-            if len(previous_cases_str) > 2000:
-                previous_cases_str = previous_cases_str[:1000] + " ...[truncated]"
-            # Limit previous_convo to last 3 messages
-            if isinstance(previous_convo, list):
-                previous_convo = previous_convo[-3:]
+            return research_response.json()
         else:
-            previous_cases_str = ""
-            logging.warning(f"Research endpoint failed with status: {research_response.status_code}")
-            previous_cases = {}
-        
-        completion = groq.chat.completions.create(
-            model = "qwen-qwq-32b",
-            messages= [
-                {
-                    "role": "system",
-                    "content": "You're a helpful Lawyer based in India. You are given a question and a context We've also implmented RAG (Retrieval-Augmented Generation) to retrive previous cases and their verdicts. You need to answer the question based on the context and those previous cases. You need to answer in the same language as the question."
-                },
-                {
-                    "role": "user",
-                    "content": f"Previous Cases: {previous_cases_str}"
-                },
-                {
-                    "role": "user",
-                    "content": f"Question: {request.query}"
-                },
-                {
-                    "role": "user",
-                    "content": f"Previous Conversation: {previous_convo}"
-                }
-            ],
-            temperature=0.7,
-            max_completion_tokens=4096,
-            top_p=0.95,
-            stream=False,
-            stop=None,
-        )
-
-        answer = completion.choices[0].message.content if completion.choices else None
-
-        if answer:
-            # Store chat history if user is authenticated
-            if user_id:
-                await save_or_update_chat(
-                    user_id=user_id,
-                    chat_id=validated_chat_id,
-                    question=request.query,
-                    previous_convo=previous_convo,
-                    answer=answer
-                )
-                
-            return {
-                "answer": answer
-            }
-        else:
-            raise HTTPException(status_code=500, detail="No response, Try again")
+            raise HTTPException(
+                status_code=research_response.status_code,
+                detail=f"Research endpoint failed with status: {research_response.status_code}"
+            )
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
@@ -597,14 +560,21 @@ async def chat_hinglish(request: HinglishChatRequest, current_user: dict = Depen
         if answer:
             # Store chat history if user is authenticated
             if user_id:
-                await save_or_update_chat(
+                chat_result = await save_or_update_chat(
                     user_id=user_id,
                     chat_id=validated_chat_id,
                     question=request.question,
                     previous_convo=previous_convo,
-                    answer=answer
+                    answer=answer,
+                    chat_type="hinglish"
                 )
                 
+                return {
+                    "answer": answer,
+                    "chat_id": chat_result["chat_id"],
+                    "status": "Chat doesn't exist, creating new" if not request.chat_id else "Chat updated successfully"
+                }
+            
             return {
                 "answer": answer
             }

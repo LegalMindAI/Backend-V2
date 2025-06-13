@@ -25,6 +25,7 @@ class ChatSummary(BaseModel):
     title: str
     updated_at: str
     created_at: Optional[str] = None
+    chat_type: Optional[str] = None
 
 class ChatMessage(BaseModel):
     role: str
@@ -87,7 +88,15 @@ async def list_chat_titles(
         raise HTTPException(status_code=401, detail="User not authenticated")
     
     chat_titles = await get_chat_titles(user_id)
-    return chat_titles
+    # Always return chat_type, defaulting to 'basic'
+    result = []
+    for chat in chat_titles:
+        chat_copy = dict(chat)
+        # default fallback to basic
+        if 'chat_type' not in chat_copy or chat_copy['chat_type'] is None:
+            chat_copy['chat_type'] = 'basic'
+        result.append(chat_copy)
+    return result
 
 @chat_history_router.get("/{chat_id}", response_model=ChatDetail)
 async def get_chat_detail(

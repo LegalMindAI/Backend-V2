@@ -28,7 +28,7 @@ dynamodb = boto3.resource(
 chat_table = dynamodb.Table(CHAT_TABLE_NAME)
 
 async def save_or_update_chat(user_id: str, chat_id: Optional[str], question: str, 
-                              previous_convo: List[str], answer: str) -> Dict[str, Any]:
+                              previous_convo: List[str], answer: str, chat_type: str = "basic") -> Dict[str, Any]:
     """
     This is the function to save or update a chat in DDB
 
@@ -38,6 +38,7 @@ async def save_or_update_chat(user_id: str, chat_id: Optional[str], question: st
         question: The question
         previous_convo: List of previous conversations (already retrieved from DB if chat_id exists)
         answer: The AI's answer to the question
+        chat_type: Type of chat (basic, advanced, hinglish)
     """
     current_time = datetime.now().isoformat()
     
@@ -97,7 +98,8 @@ async def save_or_update_chat(user_id: str, chat_id: Optional[str], question: st
         'title': title,
         'conversation': conversation,
         'updated_at': current_time,
-        'created_at': current_time_created if 'current_time_created' in locals() else current_time
+        'created_at': current_time_created if 'current_time_created' in locals() else current_time,
+        'chat_type': chat_type
     }
     
     # Save to DynamoDB
@@ -107,7 +109,8 @@ async def save_or_update_chat(user_id: str, chat_id: Optional[str], question: st
         return {
             'chat_id': chat_id,
             'title': title,
-            'updated_at': current_time
+            'updated_at': current_time,
+            'chat_type': chat_type
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error saving chat: {str(e)}")
@@ -125,7 +128,7 @@ async def get_chat_titles(user_id: str) -> List[Dict[str, Any]]:
             ExpressionAttributeValues={
                 ":uid": user_id
             },
-            ProjectionExpression="chat_id, title, updated_at, created_at"
+            ProjectionExpression="chat_id, title, updated_at, created_at, chat_type"
         )
         
         # Sort by updated_at in descending order

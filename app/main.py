@@ -1,5 +1,6 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+import httpx
 from .api.routes import app_router
 from .auth.firebase_auth import auth_router
 from .api.chat_history import chat_history_router
@@ -35,3 +36,24 @@ app.add_middleware(
 @app.get("/")
 async def root():
     return {"message": "Welcome to the LegalAI v2 API"}
+
+# Health check route
+@app.get("/health/advanced")
+async def health_check():
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get("http://localhost")
+            return {
+                "status": "healthy",
+                "localhost_status": response.status_code,
+                "message": "Successfully connected"
+            }
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "unhealthy",
+                "error": str(e),
+                "message": "Failed to connect"
+            }
+        )
